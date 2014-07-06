@@ -1,11 +1,11 @@
 #include <SPI.h>
 #include <Ethernet.h>
-//#include "Adafruit_PWMServoDriver.h"
+#include <Wire.h>
+#include "Adafruit_PWMServoDriver.h"
 
 #define ZONE_COUNT 9
-#define RED 0
-#define GREEN 0
-#define BLUE 0
+#define NUM_PWM_DRIVERS ZONE_COUNT/5
+#define NUM_COLORS 3 // RED: 0, GREEN: 1, BLUE: 2
 
 #define DEFAULT_FREQUENCY 0.00025 // cycles per ms
 
@@ -35,6 +35,8 @@ byte mac[] = {
 };
 EthernetServer server(80);
 
+Adafruit_PWMServoDriver pwmDrivers[NUM_PWM_DRIVERS];
+
 void setup() {  
 //  setUpWifi();
   Serial.begin(9600);
@@ -43,14 +45,26 @@ void setup() {
   Ethernet.begin(mac, ip);
   Serial.println(Ethernet.localIP());
   
-//  wifiServer.begin();
-//
+  setUpPWMDrivers();
+  
 //  pinMode(13, OUTPUT);
 //  digitalWrite(13, LOW);
 //  digitalWrite(13, HIGH);
   
   soundSensitivity = 0.0;
   lastMillis = millis();  
+}
+
+void setUpPWMDrivers() {
+  unsigned int baseAddress = 0x40;
+  for(int pwmDriverInd = 0; pwmDriverInd < NUM_PWM_DRIVERS; pwmDriverInd++) {
+    pwmDrivers[pwmDriverInd] = Adafruit_PWMServoDriver(baseAddress + pwmDriverInd);
+    pwmDrivers[pwmDriverInd].begin();
+    pwmDrivers[pwmDriverInd].setPWMFreq(50);
+}
+
+void sendPWM(unsigned int zone, unsigned int colorOffset, unsigned int value) {
+  pwmDrivers[zone / 5].setPWM(zone % 5 + colorOffset, 0, value);
 }
 /* NOTE for computing buffers on ipad side; use Obj-C of course
 arr = (0..50).map{ |x| x / 50.0 }
@@ -100,9 +114,10 @@ void setPins() {
   int soundIndex = min(soundSensitivity * soundPower * BUFFER_SIZE_SOUND, BUFFER_SIZE_SOUND);
 
   for(int zone = 0; zone < ZONE_COUNT; zone++) {
-    int redPin = 16 * max(frequencyBuffers[zone][RED][frequencyIndex], soundBuffers[zone][RED][soundIndex]);
-    int greenPin = 16 * max(frequencyBuffers[zone][GREEN][frequencyIndex], soundBuffers[zone][GREEN][soundIndex]);
-    int bluePin = 16 * max(frequencyBuffers[zone][BLUE][frequencyIndex], soundBuffers[zone][BLUE][soundIndex]);
+    for(int color = 0; color < NUM_COLORS; color++) {
+      sendPWM(zone, color, 16 * max(frequencyBuffers[zone][frequencyIndex][color], 
+      soundBuffers[zone][soundIndex][color]));
+    }
   }
 }
 
