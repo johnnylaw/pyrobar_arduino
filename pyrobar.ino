@@ -5,9 +5,9 @@
 
 #define ZONE_COUNT 9
 #define NUM_PWM_DRIVERS ZONE_COUNT/5
-#define NUM_COLORS 3 // RED: 0, GREEN: 1, BLUE: 2
+#define NUM_COLORS 3 // Color offsets are RED: 0, GREEN: 1, BLUE: 2
 
-#define DEFAULT_FREQUENCY 0.00025 // cycles per ms
+#define DEFAULT_FREQUENCY 0.25
 
 #define BUFFER_SIZE_FREQUENCY 256
 #define BUFFER_SIZE_SOUND 16
@@ -25,7 +25,7 @@ uint8_t soundBuffers[ZONE_COUNT][BUFFER_SIZE_SOUND][3];
 char tempHex[3] = "00";
 
 // Set up defaults
-float frequency = DEFAULT_FREQUENCY;
+float frequency = DEFAULT_FREQUENCY / 1000.0;
 float soundSensitivity = 0.0;
 float soundPower = 0.0;
 
@@ -37,34 +37,39 @@ EthernetServer server(80);
 
 Adafruit_PWMServoDriver pwmDrivers[NUM_PWM_DRIVERS];
 
+boolean debug = false;
+
 void setup() {  
-//  setUpWifi();
   Serial.begin(9600);
-  while(!Serial);
 
   Ethernet.begin(mac, ip);
   Serial.println(Ethernet.localIP());
   
   setUpPWMDrivers();
   
-//  pinMode(13, OUTPUT);
-//  digitalWrite(13, LOW);
-//  digitalWrite(13, HIGH);
-  
   soundSensitivity = 0.0;
   lastMillis = millis();  
 }
 
 void setUpPWMDrivers() {
-  unsigned int baseAddress = 0x40;
+  uint8_t baseAddress = 0x40;
   for(int pwmDriverInd = 0; pwmDriverInd < NUM_PWM_DRIVERS; pwmDriverInd++) {
     pwmDrivers[pwmDriverInd] = Adafruit_PWMServoDriver(baseAddress + pwmDriverInd);
     pwmDrivers[pwmDriverInd].begin();
     pwmDrivers[pwmDriverInd].setPWMFreq(50);
+  }
 }
 
 void sendPWM(unsigned int zone, unsigned int colorOffset, unsigned int value) {
-  pwmDrivers[zone / 5].setPWM(zone % 5 + colorOffset, 0, value);
+  pwmDrivers[zone / 5].setPWM((zone % 5) * 3 + colorOffset, 0, value);
+  if (zone == 8 && debug) {
+    Serial.print("Driver: ");
+    Serial.print(zone / 5);
+    Serial.print(", Address: ");
+    Serial.print((zone % 5) * 3 + colorOffset);
+    Serial.print(", Value: ");
+    Serial.println(value);
+  }
 }
 /* NOTE for computing buffers on ipad side; use Obj-C of course
 arr = (0..50).map{ |x| x / 50.0 }
@@ -73,29 +78,35 @@ arr.concat (1..155).map{ |x| 0 }
 cor = 1.0/256; p arr.map{ |x| ((2 ** (8*x - 8) - cor) * 256).floor.to_s(16).sub(/^(\w)$/, '0\1') }.join
 */
 void loop() {
+  debug = analogRead(5) > 512;
   EthernetClient client = server.available();
   if (client) {
-    boolean currentLineIsBlank = true;
-    String responseCode = parseRequest(client);
-    while (client.connected()) {
-      char c = client.read();
-      Serial.print(c);
-      if (c == '\n' && currentLineIsBlank) {
-        client.print("HTTP/1.1 ");
-        client.print(responseCode);
-        client.println(responseCode == "200" ? " OK" : " BAD REQUEST");
-        client.println("Content-Type: text/plain");
-        client.println("Connection: close");  // the connection will be closed after completion of the response
-        break;
-      }
-      if (c == '\n') currentLineIsBlank = true;
-      else if (c != '\r') currentLineIsBlank = false;
-    }
-    client.stop();
+    fieldIncomingRequest(client);
+  } else {
+    soundPower = 0 / 1024.0; // read off of pin input connected to Uno output and divide by whatever (probably 1024)
+    setPins();
+    if(analogRead(0) > 512) printFrequencyBuffers();
   }
-  soundPower = 0 / 1024.0; // read off of pin input connected to Uno output and divide by whatever (probably 1024)
-  setPins();
-  if(analogRead(0) > 512) printDiagnostics();
+}
+
+void fieldIncomingRequest(EthernetClient client) {
+  boolean currentLineIsBlank = true;
+  String responseCode = parseRequest(client);
+  while (client.connected()) {
+    char c = client.read();
+//      Serial.print(c);
+    if (c == '\n' && currentLineIsBlank) {
+      client.print("HTTP/1.1 ");
+      client.print(responseCode);
+      client.println(responseCode == "200" ? " OK" : " BAD REQUEST");
+      client.println("Content-Type: text/plain");
+      client.println("Connection: close");  // the connection will be closed after completion of the response
+      break;
+    }
+    if (c == '\n') currentLineIsBlank = true;
+    else if (c != '\r') currentLineIsBlank = false;
+  }
+  client.stop();
 }
 
 int nextFrequencyIndex() {
@@ -105,20 +116,31 @@ int nextFrequencyIndex() {
 //  Serial.println(timeElapsed);
 
   lastMillis = currentMillis;
-  currentFreqBufferIndex += (timeElapsed * frequency);
+  currentFreqBufferIndex += (timeElapsed * frequency * BUFFER_SIZE_FREQUENCY);
   return (int)fmod(currentFreqBufferIndex, (float)BUFFER_SIZE_FREQUENCY);
 }
 
 void setPins() {  
   int frequencyIndex = nextFrequencyIndex();  
   int soundIndex = min(soundSensitivity * soundPower * BUFFER_SIZE_SOUND, BUFFER_SIZE_SOUND);
-
+  unsigned int value;
+//  Serial.println("\nSetting pins");
   for(int zone = 0; zone < ZONE_COUNT; zone++) {
+//    Serial.print("(");
     for(int color = 0; color < NUM_COLORS; color++) {
-      sendPWM(zone, color, 16 * max(frequencyBuffers[zone][frequencyIndex][color], 
-      soundBuffers[zone][soundIndex][color]));
+      value = 16 * max(frequencyBuffers[zone][frequencyIndex][color], 
+      soundBuffers[zone][soundIndex][color]);
+//      Serial.print("Frequency index: ");
+//      Serial.println(frequencyIndex);
+
+      sendPWM(zone, color, value);
+      
+//      Serial.print(value);
+//      if (color < NUM_COLORS - 1) Serial.print(",");
     }
+//    Serial.print("), ");
   }
+//  Serial.println();
 }
 
 String parseRequest(EthernetClient client) {
@@ -131,7 +153,7 @@ String parseRequest(EthernetClient client) {
         if(dataType == "zones") return loadBuffer(dataType, client);
         else if(dataType == FREQUENCY) {
           String string = client.readStringUntil(' ');
-          frequency = string.toFloat() * 0.001;
+          frequency = string.toFloat() / 1000.0;
           Serial.println(frequency);
           return "200";
         } else if(dataType == SOUND) {
@@ -184,25 +206,26 @@ void loadMyBuffer(uint8_t buf[][3], int bufferLength, EthernetClient client) {
   }
 }
 
-void printDiagnostics() {
-  Serial.println("\n\nRed Buffer Values");
+void printFrequencyBuffers() {
+  Serial.println("\nBuffer Values");
   for(int ptr = 0; ptr < 256; ptr++) {
     for(int zone = 0; zone < ZONE_COUNT; zone++) {
-//      Serial.print("R: ");
-//      Serial.print(frequencyBuffers[zone][ptr][0]);
-//      Serial.print(", G: ");
-//      Serial.print(frequencyBuffers[zone][ptr][1]);
-//      Serial.print(", B: ");
-//      Serial.println(frequencyBuffers[zone][ptr][2]);
+      Serial.print("(");
       Serial.print(frequencyBuffers[zone][ptr][0]);
-      Serial.print("\t");
+      Serial.print(", ");
+      Serial.print(frequencyBuffers[zone][ptr][1]);
+      Serial.print(", ");
+      Serial.print(frequencyBuffers[zone][ptr][2]);
+      Serial.print(")\t");
+//      Serial.print(frequencyBuffers[zone][ptr][0]);
+//      Serial.print("\t");
     }
     Serial.println();
   }
-  Serial.print("\nSound senstivity: ");
+  Serial.print("Sound senstivity: ");
   Serial.print(soundSensitivity);
   Serial.print(", Frequency: ");
-  Serial.println(frequency * 1000);
+  Serial.println(frequency * 1000.0);
 }
 
 //void printMacAddress() {
